@@ -1,5 +1,3 @@
-/* parser for HTS legacy Excel files */
-
 module.exports = function() {
 
    function tp() { }
@@ -17,7 +15,6 @@ module.exports = function() {
       '48': [1, 6, 7, 12, 13, 18, 19, 24, 25, 30, 31, 36, 37, 42, 43, 48],
    }
    var main_draw_rounds = ['F', 'SF', 'QF', 'R16', 'R32', 'R64', 'R128'];
-   tp.extraneous = { starts_with: ['gs', 'bez', 'pobjed', 'final'], }
 
    tp.points = {
       'HTS': {
@@ -50,6 +47,7 @@ module.exports = function() {
 
    tp.profiles = {
       'HTS': {
+         points: 'HTS',
          columns: {
             position: 'A',
             rank:     'B',
@@ -57,21 +55,42 @@ module.exports = function() {
             seed:     'D',
             players:  'E',
             club:     'G',
+            rounds:   'H',
+         },
+         rows: {
+            header:   6,
          },
          gaps: { 
             draw:     { term: 'rang', gap: 0 }, 
             preround: { term: 'rang', gap: 1 },
          },
-
+         extraneous: { 
+            starts_with: ['gs', 'bez', 'pobjed', 'final'], 
+         },
       },
       'TP': {
+         points: 'HTS',
          columns: {
             position: 'A',
             rank:     'C',
-            entry:    'B',
             players:  'E',
             country:  'D',
+            rounds:   'F',
          },
+         rows: {
+            header:   4,
+         },
+         gaps: { 
+            draw:     { term: 'Round 1', gap: 0 }, 
+         },
+         header_columns: [
+            { attr: 'id',        header: 'Member ID' },
+            { attr: 'entry',     header: 'St.' },
+            { attr: 'club',      header: 'Club' },
+            { attr: 'country',   header: 'Cnty' },
+            { attr: 'rank',      header: 'Rank' },
+            { attr: 'players',   header: 'Round 1' },
+         ],
       },
    }
 
@@ -84,18 +103,14 @@ module.exports = function() {
    }
 
    /* utilities */
-   tp.saveObject = ({json, name, dir = 'Processed'}) => tp.cacheFile(JSON.stringify(json), `${name}.json`, dir);
-   tp.loadObject = ({name, dir = 'Processed'}) => JSON.parse(tp.loadFile(dir, `${name}.json`));
-   tp.loadFile = (dir, filename) => fs.readFileSync('./' + path.join(tp.cache, dir, filename), 'utf8');
-   tp.cacheFile = (data, filename, dir, format = 'utf8') => {
+   let loadFile = (dir, filename) => fs.readFileSync('./' + path.join(tp.cache, dir, filename), 'utf8');
+   let cacheFile = (data, filename, dir, format = 'utf8') => {
       if (!filename) return;
       let target_dir = './' + path.join(tp.cache + dir) + '/';
       fs.ensureDirSync(target_dir);
       fs.writeFileSync(target_dir + filename, data, format);
    }
-
-   tp.fileList = fileList;
-   function fileList({dir = '/', require, exclude} = {}) {
+   let fileList = ({dir = '/', require, exclude} = {}) => {
       let target_dir = path.join(tp.cache, dir);
       fs.ensureDirSync(target_dir);
       var files = fs.readdirSync(target_dir).reduce(function(list, file) {
@@ -108,6 +123,10 @@ module.exports = function() {
       if (exclude) { files = files.filter(({file}) => file.indexOf(exclude) < 0); }
       return files;
    }
+
+   /* parsing */
+   let includes = (list, elements) => elements.map(e => list.indexOf(e) >= 0).reduce((a, b) => a || b);
+   let subInclude = (list, elements) => list.map(e => includes(e, elements)).reduce((a, b) => a || b);
    let findMiddle = (arr) => arr[Math.round((arr.length - 1) / 2)];
    let findMiddles = (arr, number) => {
       if (!(arr.length % 2)) return [];
@@ -127,27 +146,25 @@ module.exports = function() {
       }
       return middles;
    }
-
-   /* parsing */
-   let getRow = (reference) => parseInt(/\d+/.exec(reference)[0]);
+   let letterValue = (letter) => parseInt(letter, 36) - 9;
+   let getRow = (reference) => reference ? parseInt(/\d+/.exec(reference)[0]) : undefined;
+   let getCol = (reference) => reference ? reference[0] : undefined;
+   let findValueRefs = (search_text, sheet) => Object.keys(sheet).filter(ref => value(sheet[ref]) == search_text);
+   let validRanking = (value) => /^\d+$/.test(value) || /^MR\d+$/.test(value);
+   let inDrawColumns = (ref, round_columns) => round_columns.indexOf(ref[0]) >= 0;
+   let inDrawRows = (ref, range) => getRow(ref) >= +range[0] && getRow(ref) <= +range[1];
    let value = (cell) => {
       let val = cell ? cell.v : '';
       return (typeof val == 'string') ? val.trim() : val;
    }
-   tp.workbookList = ({require, exclude} = {}) => tp.fileList({require, exclude}).map(workbook => './' + path.join(tp.cache, workbook.dir, workbook.file));
-   tp.loadWorkbook = (file) => {
-      let workbook = tp.xlsx.readFile(file);
-      tp.setWorkbookProfile({workbook});
-      return workbook;
-   }
-   tp.cellsContaining = ({sheet, term}) => {
+   let cellsContaining = ({sheet, term}) => {
       let references = Object.keys(sheet);
       return references.filter(ref => (sheet[ref].v + '').toLowerCase().indexOf(term.toLowerCase()) >= 0);
    }
-   tp.findGaps = ({sheet, term}) => {
+   let findGaps = ({sheet, term}) => {
       let gaps = [];
       let gap_start = 0;
-      let instances = tp.cellsContaining({sheet, term}).map(reference => getRow(reference)).filter((item, i, s) => s.lastIndexOf(item) == i);
+      let instances = cellsContaining({sheet, term}).map(reference => getRow(reference)).filter((item, i, s) => s.lastIndexOf(item) == i);
       instances.unshift(0);
       let nextGap = (index) => { 
          while (instances[index + 1] == instances[index] + 1 && index < instances.length) { index += 1; }
@@ -161,32 +178,15 @@ module.exports = function() {
       }
       return gaps;
    }
-   tp.validRanking = (value) => /^\d+$/.test(value) || /^MR\d+$/.test(value);
-   tp.playerRows = ({sheet, draw = 'draw'}) => {
-      // for doubles the first player row is before the first draw position row
-      let profile = tp.profiles[tp.profile];
-      let columns = profile.columns;
-      let draw_positions = Object.keys(sheet).filter(f=>f[0] == columns.position && /\d/.test(f[1]) && /^\d+(a)?$/.test(value(sheet[f]))).map(ref=>getRow(ref));
-      let rankings = Object.keys(sheet).filter(f=>f[0] == columns.rank && /\d/.test(f[1]) && tp.validRanking(value(sheet[f]))).map(ref=>getRow(ref));
-      let rows = [].concat(draw_positions, rankings).filter((item, i, s) => s.lastIndexOf(item) == i).sort((a, b) => a - b);
-      if (profile.gaps && profile.gaps.draw) {
-         let gaps = tp.findGaps({sheet, term: profile.gaps[draw].term}); 
-         let gap = gaps[profile.gaps[draw].gap];
-         rows = rows.filter(row => row > gap[0] && row < gap[1]);
+   let extraneousData = (sheet, ref) => {
+      if (!isNaN(sheet[ref].v)) return true;
+      let extraneous = tp.profiles[tp.profile].extraneous;
+      if (extraneous && extraneous.starts_with) {
+         let cell_value = value(sheet[ref]);
+         return extraneous.starts_with.map(s => cell_value.toLowerCase().indexOf(s) == 0).reduce((a, b) => (a || b));
       }
-      let range = [rows[0], rows[rows.length - 1]];
-      return { rows, draw_positions, range };
    }
-   tp.columnReferences = (sheet, column) => Object.keys(sheet).filter(key=>key[0] == column);
-   tp.inDrawColumns = (ref, columns) => columns.indexOf(ref[0]) >= 0;
-   tp.inDrawRows = (ref, range) => getRow(ref) >= +range[0] && getRow(ref) <= +range[1];
-   tp.roundColumns = ({sheet}) => {
-      return Object.keys(sheet)
-         .filter(key => key.length == 2 && key.slice(1) == '6' && 'ABCDEFG'.split('').indexOf(key[0]) < 0)
-         .map(m=>m[0]);
-   }
-   tp.extraneousData = (sheet, ref) => !isNaN(sheet[ref].v) || tp.extraneous.starts_with.map(s => sheet[ref].v.toLowerCase().indexOf(s) == 0).reduce((a, b) => (a || b));
-   tp.scoreOrPlayer = ({cell_value, players}) => {
+   let scoreOrPlayer = ({cell_value, players}) => {
       let draw_position = tp.drawPosition({ full_name: cell_value, players });
       if (draw_position) return true;
       let score = cell_value.match(/[\d\(]+[\d\(\\ \-\,\/)O]+(Ret)?(ret)?(RET)?[\.]*$/);
@@ -198,15 +198,65 @@ module.exports = function() {
       tp.not.push(`|${cell_value}|`);
       return false;
    }
+   let lastFirstI = (name) => {
+      if (name.indexOf(',') >= 0) {
+         let components = name.toLowerCase().split(',').map(m=>removeDiacritics(m.trim()));
+         return components[1] ? `${components[0]}, ${components[1][0]}` : '';
+      }
+      let components = name.toLowerCase().split('[')[0].split(' ').filter(f=>f).map(m=>removeDiacritics(m));
+      return components.length ? `${components[0][0]}, ${components.reverse()[0]}` : '';
+   }
+   // TODO
+   let headerColumns = (sheet) => {
+   }
+
+   /* exportable functions */
+   tp.workbookList = ({require, exclude} = {}) => fileList({require, exclude}).map(workbook => './' + path.join(tp.cache, workbook.dir, workbook.file));
+   tp.loadWorkbook = (file) => {
+      let workbook = tp.xlsx.readFile(file);
+      tp.setWorkbookProfile({workbook});
+      return workbook;
+   }
+   tp.playerRows = ({sheet, draw = 'draw'}) => {
+      // for doubles the first player row is before the first draw position row
+      let profile = tp.profiles[tp.profile];
+      let columns = Object.assign({}, profile.columns);
+      if (profile.header_columns) {
+         profile.header_columns.forEach(obj => {
+            let col = getCol(findValueRefs(obj.header, sheet)[0]);
+            if (col) columns[obj.attr] = col;
+         });
+      }
+      let draw_positions = Object.keys(sheet).filter(f=>f[0] == columns.position && /\d/.test(f[1]) && /^\d+(a)?$/.test(value(sheet[f]))).map(ref=>getRow(ref));
+      let rankings = Object.keys(sheet).filter(f=>f[0] == columns.rank && /\d/.test(f[1]) && validRanking(value(sheet[f]))).map(ref=>getRow(ref));
+      let rows = [].concat(draw_positions, rankings).filter((item, i, s) => s.lastIndexOf(item) == i).sort((a, b) => a - b);
+      if (profile.gaps && profile.gaps.draw) {
+         let gaps = findGaps({sheet, term: profile.gaps[draw].term}); 
+         if (gaps.length) {
+            let gap = gaps[profile.gaps[draw].gap];
+            rows = rows.filter(row => row > gap[0] && row < gap[1]);
+         }
+      }
+      let range = [rows[0], rows[rows.length - 1]];
+      return { rows, draw_positions, range };
+   }
+   tp.roundColumns = ({sheet}) => {
+      let header_row = tp.profiles[tp.profile].rows.header;
+      let rounds_column = tp.profiles[tp.profile].columns.rounds;
+      let columns = Object.keys(sheet)
+         .filter(key => key.length == 2 && key.slice(1) == header_row && letterValue(key[0]) >= letterValue(rounds_column))
+         .map(m=>m[0]).filter((item, i, s) => s.lastIndexOf(item) == i).sort();
+      return columns;
+   }
    tp.roundData = ({sheet, players}) => {
-      let columns = tp.roundColumns({sheet});
+      let round_columns = tp.roundColumns({sheet});
       let range = tp.playerRows({sheet}).range;
       let cell_references = Object.keys(sheet)
-         .filter(ref => tp.inDrawColumns(ref, columns) && tp.inDrawRows(ref, range))
-         .filter(ref => !tp.extraneousData(sheet, ref));
-      let result = columns.map(column => { 
+         .filter(ref => inDrawColumns(ref, round_columns) && inDrawRows(ref, range))
+         .filter(ref => !extraneousData(sheet, ref));
+      let result = round_columns.map(column => { 
          let name = sheet[`${column}6`].v;
-         let column_references = cell_references.filter(ref => ref[0] == column).filter(ref => tp.scoreOrPlayer({ cell_value: value(sheet[ref]), players }));
+         let column_references = cell_references.filter(ref => ref[0] == column).filter(ref => scoreOrPlayer({ cell_value: value(sheet[ref]), players }));
          return { column, name, column_references, }
       }).filter(f=>f.column_references.length);
       return result;
@@ -215,44 +265,53 @@ module.exports = function() {
       if (workbook.SheetNames.indexOf('Pocetna') < 0) return {};
       let details = workbook.Sheets['Pocetna'];
       return {
-         naziv_turnira: details.B7 ? details.B7.v : '',
-         kategorija: details.B10 ? details.B10.v : '',
-         sve_kategorije: details.C10 ? details.C10.v : '',
-         datum_turnir: details.B12 ? details.B12.v : '',
-         datu_rang_liste: details.B14 ? details.B14.v : '',
-         rang_turnira: details.B15 ? details.B16.v : '',
-         id_turnira: details.C12 ? details.C12.v : '',
-         organizator: details.D12 ? details.D12.v : '',
-         mjesto: details.E12 ? details.E12.v : '',
-         vrhovni_sudac: details.F12 ? details.F12.v : '',
-         director_turnira: details.E14 ? details.E14.v : '',
-         dezurni_ljiecnik: details.F14 ? details.F14.v : '',
-         singlovi: workbook.SheetNames.filter(f=>f.indexOf('Si ') == 0),
-         dubl: workbook.SheetNames.filter(f=>f.indexOf('Do ') == 0),
+         naziv_turnira:    value(details.B7),
+         kategorija:       value(details.B10),
+         sve_kategorije:   value(details.C10),
+         datum_turnir:     value(details.B12),
+         datu_rang_liste:  value(details.B14),
+         rang_turnira:     value(details.B16),
+         id_turnira:       value(details.C12),
+         organizator:      value(details.D12),
+         mjesto:           value(details.E12),
+         vrhovni_sudac:    value(details.F12),
+         director_turnira: value(details.E14),
+         dezurni_ljiecnik: value(details.F14),
+         singlovi:         workbook.SheetNames.filter(f=>f.indexOf('Si ') == 0),
+         dubl:             workbook.SheetNames.filter(f=>f.indexOf('Do ') == 0),
       };
-   }
-   tp.lastFirstI = (name) => {
-      let components = name.toLowerCase().split(',').map(m=>removeDiacritics(m.trim()));
-      return components[1] ? `${components[0]}, ${components[1][0]}` : '';
    }
    tp.drawPlayers = ({sheet}) => {
       let getValue = (reference) => value(sheet[reference]);
-      let extract_seed = /\[(\d+)\]/;
-      let columns = tp.profiles[tp.profile].columns;
+      let numberValue = (reference) => !isNaN(parseInt(getValue(reference))) ? parseInt(getValue(reference)) : '';
+      let extract_seed = /\[(\d+)(\/\d+)?\]/;
+
+      let profile = tp.profiles[tp.profile];
+      let columns = Object.assign({}, profile.columns);
+      if (profile.header_columns) {
+         profile.header_columns.forEach(obj => {
+            let col = getCol(findValueRefs(obj.header, sheet)[0]);
+            if (col) columns[obj.attr] = col;
+         });
+      }
+
       let rows = tp.playerRows({sheet}).rows;
       return rows.map(row => {
          let draw_position = parseInt(getValue(`${columns.position}${row}`));
          let player = { draw_position };
+         if (columns.seed) player.seed = numberValue(`${columns.seed}${row}`);
+
          let full_name = getValue(`${columns.players}${row}`);
          if (extract_seed.test(full_name)) {
             player.seed = parseInt(extract_seed.exec(full_name)[1]);
             full_name = full_name.split('[')[0].trim();
          }
+
          player.full_name = full_name;
-         player.last_first_i = tp.lastFirstI(full_name);
-         if (columns.seed) player.seed = parseInt(getValue(`${columns.seed}${row}`));
+         player.last_first_i = lastFirstI(full_name);
+         if (columns.id) player.id = getValue(`${columns.id}${row}`);
          if (columns.club) player.club = getValue(`${columns.club}${row}`);
-         if (columns.rank) player.rank = parseInt(getValue(`${columns.rank}${row}`));
+         if (columns.rank) player.rank = numberValue(`${columns.rank}${row}`);
          if (columns.entry) player.entry = getValue(`${columns.entry}${row}`);
          if (columns.country) player.country = getValue(`${columns.country}${row}`);
          return player;
@@ -261,7 +320,7 @@ module.exports = function() {
 
    // find player draw position by last name (without diacritics), first initial; for draws where first name omitted after first round
    tp.drawPosition = ({full_name, players}) => {
-      let tournament_player = players.filter(player => player.last_first_i && player.last_first_i == tp.lastFirstI(full_name))[0];
+      let tournament_player = players.filter(player => player.last_first_i && player.last_first_i == lastFirstI(full_name))[0];
       return tournament_player ? tournament_player.draw_position : undefined;
    }
    tp.separateRounds = ({sheet, players}) => {
@@ -390,12 +449,6 @@ module.exports = function() {
             let previous_round_players = rounds[index + 1].map(match => {
                return match.winners ? match.winners[0] : match.bye ? match.bye[0] : match.players[0];
             });
-            /*
-            rounds[index + 1].forEach(match => {
-               let player = match.winners ? match.winners[0] : match.bye ? match.bye[0] : match.players[0];
-               previous_round_players.push(player);
-            });
-            */
             let eliminated_players = previous_round_players.filter(player => round_winners.indexOf(player) < 0);
             /*
             console.log('round', index);
@@ -422,19 +475,19 @@ module.exports = function() {
       return { rounds, matches };
    }
    tp.calcPoints = (category = 20, tournament_rank, round, format, draw_positions) => {
+      let profile = tp.profiles[tp.profile];
       let multiplier = category > 12 ? Math.pow(2, (category - 12) / 2) : 1;
       round = round.indexOf('Q') >= 0 ? `${draw_positions}${round}` : round;
-      let points_row = tp.points[tp.profile][format][round];
+      let points_row = tp.points[profile.points][format][round];
       return points_row && points_row[tournament_rank - 1] ? points_row[tournament_rank - 1] * multiplier : 0;
    }
    tp.drawResults = (workbook) => {
       let rows = [];
       let player_points = { singles: {}, doubles: {} };
-      let tournament_data;
       let tournament_rank;
       let tournament_category;
-      if (tp.profile == 'HTS') {
-         tournament_data = tp.profile == 'HTS' ? tp.HTS_tournamentData(workbook) : {};
+      let tournament_data = tp.profile == 'HTS' ? tp.HTS_tournamentData(workbook) : {};
+      if (Object.keys(tournament_data).length) {
          tournament_rank = parseInt(tournament_data.rang_turnira.match(/\d+/)[0]);
          tournament_category = tournament_data.kategorija.match(/\d+/);
          tournament_category = tournament_category ? parseInt(tournament_category[0]) : 'Senior';
@@ -446,6 +499,13 @@ module.exports = function() {
          let draw = tp.separateRounds({sheet, players});
          let playerData = (name) => players.filter(player => player.full_name == name)[0];
          let draw_positions = players.map(m=>m.draw_position).filter((item, i, s) => s.lastIndexOf(item) == i).length;
+
+         if (tp.profile == 'TP') {
+            let number = /\d+/;
+            let type = value(sheet['A2']);
+            tournament_rank = number.test(type) ? number.exec(type) : undefined;
+         }
+
          draw.matches.forEach(match => {
             let points = 0;
             let format = match.winner_names.length == 2 ? 'doubles' : 'singles';
@@ -481,7 +541,7 @@ module.exports = function() {
                loser_2: match.loser_names[1] || '',
                loser_2_rank: pd.l2 ? pd.l2.rank : '',
             });
-            rows.push(row);
+            if (match.winner_names[0]) rows.push(row);
          });
       }
 
@@ -498,9 +558,6 @@ module.exports = function() {
       });
       return { rows, player_points };
    }
-
-   let includes = (list, elements) => elements.map(e => list.indexOf(e) >= 0).reduce((a, b) => a || b);
-   let subInclude = (list, elements) => list.map(e => includes(e, elements)).reduce((a, b) => a || b);
    tp.setWorkbookProfile = ({workbook}) => {
       let sheet_names = workbook.SheetNames;
       if (includes(sheet_names, ['Pocetna'])) tp.profile = 'HTS';
@@ -509,15 +566,16 @@ module.exports = function() {
    }
 
    /* routines */
+   tp.saveObject = ({json, name, dir = 'Processed'}) => cacheFile(JSON.stringify(json), `${name}.json`, dir);
+   tp.loadObject = ({name, dir = 'Processed'}) => JSON.parse(loadFile(dir, `${name}.json`));
+
    tp.allWorkbooks = (workbook_files) => {
       let rows = [];
       workbook_files.forEach((workbook_file, index) => {
          console.log('processing:', workbook_file, 'index:', index);
          let workbook = x.loadWorkbook(workbook_file);
-         if (tp.profile == 'HTS') {
-            let results = x.drawResults(workbook);
-            rows = rows.concat(...results.rows);
-         }
+         let results = x.drawResults(workbook);
+         rows = rows.concat(...results.rows);
       });
       return rows;
    }
