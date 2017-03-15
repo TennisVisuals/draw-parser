@@ -2,7 +2,6 @@ module.exports = function() {
 
    function tp() { }
    let fs = require('fs-extra');
-   let removeDiacritics = require('diacritics').remove;
    tp.xlsx = require('xlsx');
    tp.cache = './excel/';
 
@@ -57,16 +56,13 @@ module.exports = function() {
             club:     'G',
             rounds:   'H',
          },
-         rows: {
-            header:   6,
-         },
+         rows: { header:   6, },
          gaps: { 
             draw:     { term: 'rang', gap: 0 }, 
             preround: { term: 'rang', gap: 1 },
          },
-         extraneous: { 
-            starts_with: ['gs', 'bez', 'pobjed', 'final'], 
-         },
+         extraneous: { starts_with: ['gs', 'bez', 'pobjed', 'final'], },
+         routines: { add_byes:   true, }
       },
       'TP': {
          points: 'HTS',
@@ -77,12 +73,8 @@ module.exports = function() {
             country:  'D',
             rounds:   'F',
          },
-         rows: {
-            header:   4,
-         },
-         gaps: { 
-            draw:     { term: 'Round 1', gap: 0 }, 
-         },
+         rows: { header:   4, },
+         gaps: { draw:     { term: 'Round 1', gap: 0 }, },
          header_columns: [
             { attr: 'id',        header: 'Member ID' },
             { attr: 'entry',     header: 'St.' },
@@ -91,6 +83,9 @@ module.exports = function() {
             { attr: 'rank',      header: 'Rank' },
             { attr: 'players',   header: 'Round 1' },
          ],
+         player_rows: { player_names: true },
+         extraneous: {},
+         routines: {},
       },
    }
 
@@ -189,7 +184,7 @@ module.exports = function() {
    let scoreOrPlayer = ({cell_value, players}) => {
       let draw_position = tp.drawPosition({ full_name: cell_value, players });
       if (draw_position) return true;
-      let score = cell_value.match(/[\d\(]+[\d\(\\ \-\,\/)O]+(Ret)?(ret)?(RET)?[\.]*$/);
+      let score = cell_value.match(/[\d\(]+[\d\(\)\[\]\\ \-\,\/O]+(Ret)?(ret)?(RET)?[\.]*$/);
       if (score && score[0] == cell_value) return true;
       let ended = ['ret.', 'RET', 'def.', 'BYE', 'w.o', 'W.O'].map(ending => cell_value.indexOf(ending) >= 0).reduce((a, b) => a || b);
       if (ended) return true;
@@ -200,14 +195,22 @@ module.exports = function() {
    }
    let lastFirstI = (name) => {
       if (name.indexOf(',') >= 0) {
-         let components = name.toLowerCase().split(',').map(m=>removeDiacritics(m.trim()));
+         let components = name.toLowerCase().split(',').map(m=>m.trim());
          return components[1] ? `${components[0]}, ${components[1][0]}` : '';
       }
-      let components = name.toLowerCase().split('[')[0].split(' ').filter(f=>f).map(m=>removeDiacritics(m));
+      let components = name.toLowerCase().split('[')[0].split(' ').filter(f=>f);
       return components.length ? `${components[0][0]}, ${components.reverse()[0]}` : '';
    }
-   // TODO
-   let headerColumns = (sheet) => {
+   let headerColumns = ({sheet}) => {
+      let profile = tp.profiles[tp.profile];
+      let columns = Object.assign({}, profile.columns);
+      if (profile.header_columns) {
+         profile.header_columns.forEach(obj => {
+            let col = getCol(findValueRefs(obj.header, sheet)[0]);
+            if (col) columns[obj.attr] = col;
+         });
+      }
+      return columns;
    }
 
    /* exportable functions */
@@ -218,18 +221,21 @@ module.exports = function() {
       return workbook;
    }
    tp.playerRows = ({sheet, draw = 'draw'}) => {
-      // for doubles the first player row is before the first draw position row
       let profile = tp.profiles[tp.profile];
-      let columns = Object.assign({}, profile.columns);
-      if (profile.header_columns) {
-         profile.header_columns.forEach(obj => {
-            let col = getCol(findValueRefs(obj.header, sheet)[0]);
-            if (col) columns[obj.attr] = col;
-         });
-      }
-      let draw_positions = Object.keys(sheet).filter(f=>f[0] == columns.position && /\d/.test(f[1]) && /^\d+(a)?$/.test(value(sheet[f]))).map(ref=>getRow(ref));
-      let rankings = Object.keys(sheet).filter(f=>f[0] == columns.rank && /\d/.test(f[1]) && validRanking(value(sheet[f]))).map(ref=>getRow(ref));
-      let rows = [].concat(draw_positions, rankings).filter((item, i, s) => s.lastIndexOf(item) == i).sort((a, b) => a - b);
+      let columns = headerColumns({sheet});
+      let player_names = Object.keys(sheet)
+         .filter(f=>f[0] == columns.players && getRow(f) > profile.rows.header)
+         .filter(f=>value(sheet[f]) && value(sheet[f]).toLowerCase() != 'bye')
+         .map(f=>getRow(f));
+      let draw_positions = Object.keys(sheet)
+         .filter(f=>f[0] == columns.position && /\d/.test(f[1]) && /^\d+(a)?$/.test(value(sheet[f])))
+         .map(ref=>getRow(ref));
+      let rankings = Object.keys(sheet)
+         .filter(f=>f[0] == columns.rank && /\d/.test(f[1]) && validRanking(value(sheet[f])))
+         .map(ref=>getRow(ref));
+      let sources = [draw_positions, rankings];
+      if (profile.player_rows && profile.player_rows.player_names) sources = player_names;
+      let rows = [].concat(...sources).filter((item, i, s) => s.lastIndexOf(item) == i).sort((a, b) => a - b);
       if (profile.gaps && profile.gaps.draw) {
          let gaps = findGaps({sheet, term: profile.gaps[draw].term}); 
          if (gaps.length) {
@@ -285,19 +291,14 @@ module.exports = function() {
       let getValue = (reference) => value(sheet[reference]);
       let numberValue = (reference) => !isNaN(parseInt(getValue(reference))) ? parseInt(getValue(reference)) : '';
       let extract_seed = /\[(\d+)(\/\d+)?\]/;
-
-      let profile = tp.profiles[tp.profile];
-      let columns = Object.assign({}, profile.columns);
-      if (profile.header_columns) {
-         profile.header_columns.forEach(obj => {
-            let col = getCol(findValueRefs(obj.header, sheet)[0]);
-            if (col) columns[obj.attr] = col;
-         });
-      }
-
+      let columns = headerColumns({sheet});
       let rows = tp.playerRows({sheet}).rows;
       return rows.map(row => {
-         let draw_position = parseInt(getValue(`${columns.position}${row}`));
+         let draw_position = numberValue(`${columns.position}${row}`);
+
+         // MUST BE DOUBLES
+         if (!draw_position) draw_position = numberValue(`${columns.position}${row + 1}`);
+
          let player = { draw_position };
          if (columns.seed) player.seed = numberValue(`${columns.seed}${row}`);
 
@@ -318,24 +319,21 @@ module.exports = function() {
       });
    }
 
-   // find player draw position by last name (without diacritics), first initial; for draws where first name omitted after first round
+   // find player draw position by last name, first initial; for draws where first name omitted after first round
    tp.drawPosition = ({full_name, players}) => {
       let tournament_player = players.filter(player => player.last_first_i && player.last_first_i == lastFirstI(full_name))[0];
       return tournament_player ? tournament_player.draw_position : undefined;
    }
-   tp.separateRounds = ({sheet, players}) => {
+   tp.tournamentDraw = ({sheet, players}) => {
       let all_round_winners = [];
       players = players || tp.drawPlayers({sheet});
       let round_data = tp.roundData({sheet, players});
 
       let columnMatches = (round) => {
          let matches = [];
-         let round_occurrences = [];
-
-         // accumulate winners for doubles
          let winners = [];
-
          let last_draw_position;
+         let round_occurrences = [];
          let last_row_number = getRow(round.column_references[0]) - 1;
          round.column_references.forEach((reference, index) => {
             // if row number not sequential => new match
@@ -403,11 +401,12 @@ module.exports = function() {
          return { rounds, matches: [] };
       }
 
-      // add seeded players with byes to 2nd round players
-      // rounds[0] is 2nd round before 1st round players added below
-      // TODO: currently only works for singles draws
-      if (draw_byes[players.length]) {
-         draw_byes[players.length].forEach(player => { rounds[0].push({ bye: [player] }); });
+      let profile = tp.profiles[tp.profile];
+      if (draw_byes[players.length] && profile.routines && profile.routines.add_byes) {
+         let round_winners = [].concat(...rounds[0].map(match => match.winners).filter(f=>f));
+         draw_byes[players.length].forEach(player => { 
+            if (round_winners.indexOf(player) < 0) rounds[0].push({ bye: [player] }); 
+         });
          rounds[0].sort((a, b) => {
             let adp = a.winners ? a.winners[0] : a.bye[0];
             let bdp = b.winners ? b.winners[0] : b.bye[0];
@@ -440,7 +439,6 @@ module.exports = function() {
          if (index + 1 < rounds.length) {
             let round_matches = [];
             let round_winners = [];
-            // let previous_round_players = [];
             round.forEach(match => {
                let player = match.winners ? match.winners[0] : match.bye ? match.bye[0] : match.players[0];
                round_winners.push(player);
@@ -454,7 +452,7 @@ module.exports = function() {
             console.log('round', index);
             console.log('round matches', round_matches);
             console.log('round winners', round_winners.length);
-            console.log('previous round players', previous_round_players.length);
+            console.log('previous round players', previous_round_players);
             console.log('eliminated players', eliminated_players.length);
             */
             let draw_positions = players.map(m=>m.draw_position).filter((item, i, s) => s.lastIndexOf(item) == i).length;
@@ -496,14 +494,14 @@ module.exports = function() {
       let processDraw = (sheet_name) => {
          let sheet = workbook.Sheets[sheet_name];
          let players = tp.drawPlayers({sheet});
-         let draw = tp.separateRounds({sheet, players});
+         let draw = tp.tournamentDraw({sheet, players});
          let playerData = (name) => players.filter(player => player.full_name == name)[0];
          let draw_positions = players.map(m=>m.draw_position).filter((item, i, s) => s.lastIndexOf(item) == i).length;
 
          if (tp.profile == 'TP') {
             let number = /\d+/;
             let type = value(sheet['A2']);
-            tournament_rank = number.test(type) ? number.exec(type) : undefined;
+            tournament_category = number.test(type) ? number.exec(type) : undefined;
          }
 
          draw.matches.forEach(match => {
