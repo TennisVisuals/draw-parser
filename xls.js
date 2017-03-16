@@ -61,6 +61,9 @@ module.exports = function() {
             draw:     { term: 'rang', gap: 0 }, 
             preround: { term: 'rang', gap: 1 },
          },
+         header_columns: [
+            { attr: 'rr_result',     header: 'Poredak' },
+         ],
          extraneous: { starts_with: ['gs', 'bez', 'pobjed', 'final'], },
          routines: { add_byes:   true, }
       },
@@ -120,6 +123,7 @@ module.exports = function() {
    }
 
    /* parsing */
+   let unique = (arr) => arr.filter((item, i, s) => s.lastIndexOf(item) == i);
    let includes = (list, elements) => elements.map(e => list.indexOf(e) >= 0).reduce((a, b) => a || b);
    let subInclude = (list, elements) => list.map(e => includes(e, elements)).reduce((a, b) => a || b);
    let findMiddle = (arr) => arr[Math.round((arr.length - 1) / 2)];
@@ -189,7 +193,7 @@ module.exports = function() {
       let ended = ['ret.', 'RET', 'def.', 'BYE', 'w.o', 'W.O'].map(ending => cell_value.indexOf(ending) >= 0).reduce((a, b) => a || b);
       if (ended) return true;
 
-      console.log('Not Score or Player:', cell_value);
+      if (tp.verbose) console.log('Not Score or Player:', cell_value);
       tp.not.push(`|${cell_value}|`);
       return false;
    }
@@ -223,20 +227,43 @@ module.exports = function() {
    tp.playerRows = ({sheet, draw = 'draw'}) => {
       let profile = tp.profiles[tp.profile];
       let columns = headerColumns({sheet});
+
+      let rr_result = [];
       let player_names = Object.keys(sheet)
-         .filter(f=>f[0] == columns.players && getRow(f) > profile.rows.header)
-         .filter(f=>value(sheet[f]) && value(sheet[f]).toLowerCase() != 'bye')
+         .filter(f => f[0] == columns.players && getRow(f) > profile.rows.header)
+         .filter(f => value(sheet[f]) && typeof value(sheet[f]) == 'string')
          .map(f=>getRow(f));
       let draw_positions = Object.keys(sheet)
-         .filter(f=>f[0] == columns.position && /\d/.test(f[1]) && /^\d+(a)?$/.test(value(sheet[f])))
+         .filter(f => f[0] == columns.position && /\d/.test(f[1]) && /^\d+(a)?$/.test(value(sheet[f])))
          .map(ref=>getRow(ref));
       let rankings = Object.keys(sheet)
-         .filter(f=>f[0] == columns.rank && /\d/.test(f[1]) && validRanking(value(sheet[f])))
+         .filter(f => f[0] == columns.rank && /\d/.test(f[1]) && validRanking(value(sheet[f])))
          .map(ref=>getRow(ref));
-      let sources = [draw_positions, rankings];
-      if (profile.player_rows && profile.player_rows.player_names) sources = player_names;
+
+      // check whether this is Round Robin
+      if (columns.rr_result) {
+         rr_result = Object.keys(sheet)
+            .filter(f => f[0] == columns.rr_result && /\d/.test(f[1]) && /^\d+$/.test(value(sheet[f])))
+            .map(ref=>getRow(ref));
+         draw_positions = draw_positions.filter(f => rr_result.indexOf(f) >= 0);
+         rankings = rankings.filter(f => rr_result.indexOf(f) >= 0);
+      }
+
+      let sources = [draw_positions, rankings, rr_result];
+
+      // Necessary for finding all player rows in TP Doubles Draws
+      if (profile.player_rows && profile.player_rows.player_names) {
+         let additions = [];
+         player_names.forEach(f => { 
+            if (value(sheet[`E${f}`]).toLowerCase() == 'bye') additions.push(f - 1); 
+         });
+         sources.push(player_names);
+      }
+
       let rows = [].concat(...sources).filter((item, i, s) => s.lastIndexOf(item) == i).sort((a, b) => a - b);
-      if (profile.gaps && profile.gaps.draw) {
+
+      // filter rows by gaps unless Round Robin Results Column
+      if (profile.gaps && profile.gaps.draw && !columns.rr_result) {
          let gaps = findGaps({sheet, term: profile.gaps[draw].term}); 
          if (gaps.length) {
             let gap = gaps[profile.gaps[draw].gap];
@@ -254,9 +281,10 @@ module.exports = function() {
          .map(m=>m[0]).filter((item, i, s) => s.lastIndexOf(item) == i).sort();
       return columns;
    }
-   tp.roundData = ({sheet, players}) => {
+   tp.roundData = ({sheet, player_data}) => {
+      let players = player_data.players;
       let round_columns = tp.roundColumns({sheet});
-      let range = tp.playerRows({sheet}).range;
+      let range = player_data.range;
       let cell_references = Object.keys(sheet)
          .filter(ref => inDrawColumns(ref, round_columns) && inDrawRows(ref, range))
          .filter(ref => !extraneousData(sheet, ref));
@@ -292,8 +320,9 @@ module.exports = function() {
       let numberValue = (reference) => !isNaN(parseInt(getValue(reference))) ? parseInt(getValue(reference)) : '';
       let extract_seed = /\[(\d+)(\/\d+)?\]/;
       let columns = headerColumns({sheet});
-      let rows = tp.playerRows({sheet}).rows;
-      return rows.map(row => {
+      let rows, range;
+      ({rows, range} = tp.playerRows({sheet}));
+      let players = rows.map(row => {
          let draw_position = numberValue(`${columns.position}${row}`);
 
          // MUST BE DOUBLES
@@ -315,8 +344,10 @@ module.exports = function() {
          if (columns.rank) player.rank = numberValue(`${columns.rank}${row}`);
          if (columns.entry) player.entry = getValue(`${columns.entry}${row}`);
          if (columns.country) player.country = getValue(`${columns.country}${row}`);
+         if (columns.rr_result) player.rr_result = getValue(`${columns.rr_result}${row}`);
          return player;
       });
+      return { players, rows, range };
    }
 
    // find player draw position by last name, first initial; for draws where first name omitted after first round
@@ -324,57 +355,83 @@ module.exports = function() {
       let tournament_player = players.filter(player => player.last_first_i && player.last_first_i == lastFirstI(full_name))[0];
       return tournament_player ? tournament_player.draw_position : undefined;
    }
-   tp.tournamentDraw = ({sheet, players}) => {
-      let all_round_winners = [];
-      players = players || tp.drawPlayers({sheet});
-      let round_data = tp.roundData({sheet, players});
 
-      let columnMatches = (round) => {
-         let matches = [];
-         let winners = [];
-         let last_draw_position;
-         let round_occurrences = [];
-         let last_row_number = getRow(round.column_references[0]) - 1;
-         round.column_references.forEach((reference, index) => {
-            // if row number not sequential => new match
-            let this_row_number = getRow(reference);
-            if (this_row_number != last_row_number + 1 && winners.length) {
-               if (last_draw_position) {
-                  // keep track of how many times draw position occurs in column
-                  if (!round_occurrences[last_draw_position]) round_occurrences[last_draw_position] = [];
-                  round_occurrences[last_draw_position].push(matches.length);
-               }
-               matches.push({ winners, });
-               winners = [];
+   let columnMatches = (sheet, round, players) => {
+      let matches = [];
+      let winners = [];
+      let last_draw_position;
+      let round_occurrences = [];
+      let last_row_number = getRow(round.column_references[0]) - 1;
+      round.column_references.forEach((reference, index) => {
+         // if row number not sequential => new match
+         let this_row_number = getRow(reference);
+         if (this_row_number != last_row_number + 1 && winners.length) {
+            if (last_draw_position) {
+               // keep track of how many times draw position occurs in column
+               if (!round_occurrences[last_draw_position]) round_occurrences[last_draw_position] = [];
+               round_occurrences[last_draw_position].push(matches.length);
             }
-            last_row_number = this_row_number;
+            matches.push({ winners, });
+            winners = [];
+         }
+         last_row_number = this_row_number;
 
-            let cell_value = value(sheet[reference]);
-            let draw_position = tp.drawPosition({ full_name: cell_value, players });
-            // cell_value is a draw position => round winner(s)
-            if (draw_position != undefined) {
-               last_draw_position = draw_position;
-               if (winners.indexOf(draw_position) < 0) winners.push(draw_position);
-               if (all_round_winners.indexOf(draw_position) < 0) all_round_winners.push(draw_position);
-            } else {
-               // cell_value is not draw position => match score
-               if (last_draw_position) {
-                  // keep track of how many times draw position occurs in column
-                  if (!round_occurrences[last_draw_position]) round_occurrences[last_draw_position] = [];
-                  round_occurrences[last_draw_position].push(matches.length);
-               }
-               matches.push({ winners, result: cell_value });
-               winners = [];
+         let cell_value = value(sheet[reference]);
+         let draw_position = tp.drawPosition({ full_name: cell_value, players });
+         // cell_value is a draw position => round winner(s)
+         if (draw_position != undefined) {
+            last_draw_position = draw_position;
+            if (winners.indexOf(draw_position) < 0) winners.push(draw_position);
+         } else {
+            // cell_value is not draw position => match score
+            if (last_draw_position) {
+               // keep track of how many times draw position occurs in column
+               if (!round_occurrences[last_draw_position]) round_occurrences[last_draw_position] = [];
+               round_occurrences[last_draw_position].push(matches.length);
             }
+            matches.push({ winners, result: cell_value });
+            winners = [];
+         }
+      });
+      // still winners => last column match had a bye
+      if (winners.length) matches.push({ bye: winners });
+      round_occurrences = round_occurrences.map((indices, draw_position) => { return { draw_position, indices }}).filter(f=>f);
+      return { round_occurrences, matches };
+   }
+
+   let addByes = (rounds, players) => {
+      let profile = tp.profiles[tp.profile];
+      if (draw_byes[players.length] && profile.routines && profile.routines.add_byes) {
+         let round_winners = [].concat(...rounds[0].map(match => match.winners).filter(f=>f));
+         draw_byes[players.length].forEach(player => { 
+            if (round_winners.indexOf(player) < 0) rounds[0].push({ bye: [player] }); 
          });
-         // still winners => last column match had a bye
-         if (winners.length) matches.push({ bye: winners });
-         round_occurrences = round_occurrences.map((indices, draw_position) => { return { draw_position, indices }}).filter(f=>f);
-         return { round_occurrences, matches };
+         rounds[0].sort((a, b) => {
+            let adp = a.winners ? a.winners[0] : a.bye[0];
+            let bdp = b.winners ? b.winners[0] : b.bye[0];
+            return adp - bdp;
+         });
+      } else {
+         draw_byes[players.length] = [];
       }
-      let rounds = round_data.map(round => columnMatches(round));
+      return rounds;
+   }
 
-      // check each round for embedded rounds
+   let add1stRound = (rounds, players) => {
+      // 1st round players are players without byes or wins 
+      let winners = unique([].concat(...rounds.map(matches => [].concat(...matches.map(match => match.winners).filter(f=>f)))));
+      let notWinner = (draw_position) => winners.indexOf(draw_position) < 0;
+      let notBye = (draw_position) => draw_byes[players.length].indexOf(draw_position) < 0;
+      let first_round_losers = players
+         .filter(player => notWinner(player.draw_position) && notBye(player.draw_position))
+         .map(m=>m.draw_position)
+         .filter((item, i, s) => s.lastIndexOf(item) == i)
+         .map(m => { return { players: [m] }});
+      rounds.push(first_round_losers);
+      return rounds;
+   }
+
+   let findEmbeddedRounds = (rounds) => {
       let embedded_rounds = [];
       rounds.forEach((round, index) => {
          let embedded = round.round_occurrences.filter(f=>f.indices.length > 1).length;
@@ -393,46 +450,10 @@ module.exports = function() {
             round.matches = round.matches.filter(match => match.result);
          }
       });
-      embedded_rounds.forEach(round => rounds.push(round));
-      rounds = rounds.map(round => round.matches);
+      return embedded_rounds;
+   }
 
-      if (!rounds.length) {
-         console.log('ERROR WITH SHEET - Possibly abandoned.', tp.profile, 'format.');
-         return { rounds, matches: [] };
-      }
-
-      let profile = tp.profiles[tp.profile];
-      if (draw_byes[players.length] && profile.routines && profile.routines.add_byes) {
-         let round_winners = [].concat(...rounds[0].map(match => match.winners).filter(f=>f));
-         draw_byes[players.length].forEach(player => { 
-            if (round_winners.indexOf(player) < 0) rounds[0].push({ bye: [player] }); 
-         });
-         rounds[0].sort((a, b) => {
-            let adp = a.winners ? a.winners[0] : a.bye[0];
-            let bdp = b.winners ? b.winners[0] : b.bye[0];
-            return adp - bdp;
-         });
-      } else {
-         draw_byes[players.length] = [];
-      }
-
-      /* reverse rounds to:
-         - append first round to end
-         - start identifying matches with Final
-         - filter players with byes into 2nd round
-      */
-      rounds.reverse();
-
-      // 1st round players are players without byes or wins 
-      let notWinner = (draw_position) => all_round_winners.indexOf(draw_position) < 0;
-      let notBye = (draw_position) => draw_byes[players.length].indexOf(draw_position) < 0;
-      let first_round_losers = players
-         .filter(player => notWinner(player.draw_position) && notBye(player.draw_position))
-         .map(m=>m.draw_position)
-         .filter((item, i, s) => s.lastIndexOf(item) == i)
-         .map(m => { return { players: [m] }});
-      rounds.push(first_round_losers);
-
+   let constructMatches = (rounds, players) => {
       let draw_type = rounds[0].length == 1 ? 'main' : 'qualification';
       rounds.forEach((round, index) => {
          if (index + 2 == rounds.length) round = round.filter(player => player.bye == undefined);
@@ -448,13 +469,6 @@ module.exports = function() {
                return match.winners ? match.winners[0] : match.bye ? match.bye[0] : match.players[0];
             });
             let eliminated_players = previous_round_players.filter(player => round_winners.indexOf(player) < 0);
-            /*
-            console.log('round', index);
-            console.log('round matches', round_matches);
-            console.log('round winners', round_winners.length);
-            console.log('previous round players', previous_round_players);
-            console.log('eliminated players', eliminated_players.length);
-            */
             let draw_positions = players.map(m=>m.draw_position).filter((item, i, s) => s.lastIndexOf(item) == i).length;
             let round_name = index + 2 < rounds.length || index < 3 ? main_draw_rounds[index] : `R${draw_positions}`;
             round_matches.forEach((match, match_index) => {
@@ -464,14 +478,104 @@ module.exports = function() {
             });
          }
       });
+      return rounds;
+   }
 
-      // merge all rounds into list of matches
-      let matches = [].concat(...rounds).filter(f=>f.losers && f.result);
+   let findPlayerAtDrawPosition = (players, start, goal, direction) => {
+      let index = start + direction;
+      while (players[index].draw_position != goal && index < players.length && index >= 0) { index += direction; }
+      return index;
+   }
 
-      // add player names to matches
-      matches.forEach(match => match.winner_names = players.filter(f=>f.draw_position == match.winners[0]).map(p=>p.full_name));
+   // TODO: Scores need to be normalized
+   let determineWinner = (score) => {
+      let tally = [0, 0];
+      let set_scores = score.split(' ');
+      set_scores.forEach(set_score => tally[parseInt(set_score[0]) > parseInt(set_score[1]) ? 0 : 1] += 1);
+      return tally[0] > tally[1] ? 0 : 1;
+   }
+
+   let reverseScore = (score) => {
+      return score.split(' ').map(set_score => {
+         let tiebreak = /\((\d+)\)/.exec(set_score);
+         let scores = set_score.split('(')[0].split('').reverse().join('');
+         if (tiebreak) scores += `${tiebreak[0]}`;
+         return scores;
+      }).join(' ');
+   }
+
+   tp.tournamentDraw = ({sheet, player_data}) => {
+      let rounds = [];
+      let matches = [];
+      player_data = player_data || tp.drawPlayers({sheet});
+      let players = player_data.players;
+      let round_data = tp.roundData({sheet, player_data});
+      let round_robin = players.map(p=>p.rr_result != undefined).reduce((a, b) => a || b);
+
+      if (round_robin) {
+         let hash = [];
+         let player_rows = player_data.rows;
+         let group_size = Math.max(...players.map(p=>p.draw_position));
+
+         // combine all cell references that are in result columns
+         let rr_columns = round_data.map(m=>m.column).slice(0, group_size);
+         let result_references = [].concat(...round_data.map((round, index) => index < group_size ? round.column_references : []));
+         player_rows.forEach((player_row, player_index) => {
+            let player_result_referencess = result_references.filter(ref => ref.slice(1) == player_row);
+            player_result_referencess.forEach(reference => {
+               let result_column = reference[0];
+               let player_draw_position = players[player_index].draw_position;
+               let opponent_draw_position = rr_columns.indexOf(result_column) + 1;
+               let direction = opponent_draw_position > player_draw_position ? 1 : -1;
+               let opponent_index = findPlayerAtDrawPosition(players, player_index, opponent_draw_position, direction);
+               let result = value(sheet[reference]);
+               let match_winner = determineWinner(result);
+               let loser = match_winner ? player_index : opponent_index;
+               let winner = match_winner ? opponent_index : player_index;
+               if (match_winner) result = reverseScore(result);
+
+               let match = { 
+                  winner, 
+                  winner_name: players[winner].full_name,
+                  loser,
+                  loser_name: players[loser].full_name,
+                  result,
+               };
+
+               if (hash.indexOf(`${winner}${loser}${result}`) < 0) {
+                  hash.push(`${winner}${loser}${result}`);
+                  matches.push(match);
+               }
+            });
+         });
+      } else {
+         rounds = round_data.map(round => columnMatches(sheet, round, players));
+         findEmbeddedRounds(rounds).forEach(round => rounds.push(round));
+         rounds = rounds.map(round => round.matches);
+         if (!rounds.length) {
+            if (tp.verbose) console.log('ERROR WITH SHEET - Possibly abandoned.', tp.profile, 'format.');
+            return { rounds, matches: [] };
+         }
+         rounds = addByes(rounds, players);
+         /* reverse rounds to:
+            - append first round to end
+            - start identifying matches with Final
+            - filter players with byes into 2nd round
+         */
+         rounds.reverse();
+         rounds = add1stRound(rounds, players);
+         rounds = constructMatches(rounds, players);
+
+         // merge all rounds into list of matches
+         matches = [].concat(...rounds).filter(f=>f.losers && f.result);
+
+         // add player names to matches
+         matches.forEach(match => match.winner_names = players.filter(f=>f.draw_position == match.winners[0]).map(p=>p.full_name));
+      }
+
       return { rounds, matches };
    }
+
    tp.calcPoints = (category = 20, tournament_rank, round, format, draw_positions) => {
       let profile = tp.profiles[tp.profile];
       let multiplier = category > 12 ? Math.pow(2, (category - 12) / 2) : 1;
@@ -479,9 +583,16 @@ module.exports = function() {
       let points_row = tp.points[profile.points][format][round];
       return points_row && points_row[tournament_rank - 1] ? points_row[tournament_rank - 1] * multiplier : 0;
    }
+
    tp.drawResults = (workbook) => {
       let rows = [];
+
+      // keep track of points awarded
+      // draws are processed starting with Finals so that once points have been
+      // awarded to player(s) no further points awarded for matches in same draw
       let player_points = { singles: {}, doubles: {} };
+
+      let draw_type;
       let tournament_rank;
       let tournament_category;
       let tournament_data = tp.profile == 'HTS' ? tp.HTS_tournamentData(workbook) : {};
@@ -493,8 +604,9 @@ module.exports = function() {
 
       let processDraw = (sheet_name) => {
          let sheet = workbook.Sheets[sheet_name];
-         let players = tp.drawPlayers({sheet});
-         let draw = tp.tournamentDraw({sheet, players});
+         let player_data = tp.drawPlayers({sheet});
+         let players = player_data.players;
+         let draw = tp.tournamentDraw({sheet, player_data});
          let playerData = (name) => players.filter(player => player.full_name == name)[0];
          let draw_positions = players.map(m=>m.draw_position).filter((item, i, s) => s.lastIndexOf(item) == i).length;
 
@@ -504,10 +616,15 @@ module.exports = function() {
             tournament_category = number.test(type) ? number.exec(type) : undefined;
          }
 
+         // TODO: draw_type
+         // HTS UTJEŠNI TURNIR == Consolation => no points
+         
+         // TODO: points as separate funciton result
+
          draw.matches.forEach(match => {
             let points = 0;
             let format = match.winner_names.length == 2 ? 'doubles' : 'singles';
-            if (!player_points[format][match.winner_names[0]]) {
+            if (!player_points[format][match.winner_names[0]] && draw_type != 'consolation') {
                points = tp.calcPoints(tournament_category, tournament_rank, match.round, format, draw_positions);
                player_points[format][match.winner_names[0]] = points;
             }
@@ -551,11 +668,12 @@ module.exports = function() {
          }
          return sheet_name;
       }).forEach(sheet_name => {
-         console.log('processing draw:', sheet_name);
+         if (tp.verbose) console.log('processing draw:', sheet_name);
          processDraw(sheet_name);
       });
       return { rows, player_points };
    }
+
    tp.setWorkbookProfile = ({workbook}) => {
       let sheet_names = workbook.SheetNames;
       if (includes(sheet_names, ['Pocetna'])) tp.profile = 'HTS';
@@ -569,6 +687,7 @@ module.exports = function() {
 
    tp.allWorkbooks = (workbook_files) => {
       let rows = [];
+      tp.verbose = true;
       workbook_files.forEach((workbook_file, index) => {
          console.log('processing:', workbook_file, 'index:', index);
          let workbook = x.loadWorkbook(workbook_file);
