@@ -1,11 +1,6 @@
-module.exports = function() {
+!function() {
 
-   function tp() { }
-   let fs = require('fs-extra');
-   tp.xlsx = require('xlsx');
-   tp.cache = './excel/';
-
-   tp.not = [];
+   function tp() {};
 
    /* tables */
    var draw_byes = {
@@ -14,6 +9,11 @@ module.exports = function() {
       '48': [1, 6, 7, 12, 13, 18, 19, 24, 25, 30, 31, 36, 37, 42, 43, 48],
    }
    var main_draw_rounds = ['F', 'SF', 'QF', 'R16', 'R32', 'R64', 'R128'];
+
+   tp.config = {
+      score:   /[\d\(]+[\d\(\)\[\]\\ \-\,\/O]+(Ret)?(ret)?(RET)?[\.]*$/,
+      ended:   ['ret.', 'RET', 'Def.', 'def.', 'BYE', 'w.o', 'W.O', 'Abandoned'],
+   }
 
    tp.points = {
       'HTS': {
@@ -92,36 +92,6 @@ module.exports = function() {
       },
    }
 
-   /* analysis */
-   tp.gatherSheetNames = (require = 'xlsm') => [].concat(...tp.workbookList({require}).map(workbook => tp.xlsx.readFile(workbook, { bookSheets: true, }).SheetNames));
-   tp.nameCount = (sheet_names) => {
-      count = {};
-      sheet_names.forEach(name => { if (Object.keys(count).indexOf(name) >= 0) { count[name] += 1; } else { count[name] = 1; } });
-      return count;
-   }
-
-   /* utilities */
-   let loadFile = (dir, filename) => fs.readFileSync('./' + path.join(tp.cache, dir, filename), 'utf8');
-   let cacheFile = (data, filename, dir, format = 'utf8') => {
-      if (!filename) return;
-      let target_dir = './' + path.join(tp.cache + dir) + '/';
-      fs.ensureDirSync(target_dir);
-      fs.writeFileSync(target_dir + filename, data, format);
-   }
-   let fileList = ({dir = '/', require, exclude} = {}) => {
-      let target_dir = path.join(tp.cache, dir);
-      fs.ensureDirSync(target_dir);
-      var files = fs.readdirSync(target_dir).reduce(function(list, file) {
-        var name = path.join(target_dir, file);
-        var isDir = fs.statSync(name).isDirectory();
-        return list.concat(isDir ? fileList({dir: `${dir}/${file}/`, require, exclude}) : [{ dir: dir, file: file }]);
-      }, []);
-      files = files.filter(({file}) => file[0] != '.');
-      if (require) { files = files.filter(({file}) => file.indexOf(require) >= 0); }
-      if (exclude) { files = files.filter(({file}) => file.indexOf(exclude) < 0); }
-      return files;
-   }
-
    /* parsing */
    let unique = (arr) => arr.filter((item, i, s) => s.lastIndexOf(item) == i);
    let includes = (list, elements) => elements.map(e => list.indexOf(e) >= 0).reduce((a, b) => a || b);
@@ -188,13 +158,12 @@ module.exports = function() {
    let scoreOrPlayer = ({cell_value, players}) => {
       let draw_position = tp.drawPosition({ full_name: cell_value, players });
       if (draw_position) return true;
-      let score = cell_value.match(/[\d\(]+[\d\(\)\[\]\\ \-\,\/O]+(Ret)?(ret)?(RET)?[\.]*$/);
+      let score = cell_value.match(tp.config.score);
       if (score && score[0] == cell_value) return true;
-      let ended = ['ret.', 'RET', 'def.', 'BYE', 'w.o', 'W.O'].map(ending => cell_value.indexOf(ending) >= 0).reduce((a, b) => a || b);
+      let ended = tp.config.ended.map(ending => cell_value.indexOf(ending) >= 0).reduce((a, b) => a || b);
       if (ended) return true;
 
       if (tp.verbose) console.log('Not Score or Player:', cell_value);
-      tp.not.push(`|${cell_value}|`);
       return false;
    }
    let lastFirstI = (name) => {
@@ -218,12 +187,6 @@ module.exports = function() {
    }
 
    /* exportable functions */
-   tp.workbookList = ({require, exclude} = {}) => fileList({require, exclude}).map(workbook => './' + path.join(tp.cache, workbook.dir, workbook.file));
-   tp.loadWorkbook = (file) => {
-      let workbook = tp.xlsx.readFile(file);
-      tp.setWorkbookProfile({workbook});
-      return workbook;
-   }
    tp.playerRows = ({sheet, draw = 'draw'}) => {
       let profile = tp.profiles[tp.profile];
       let columns = headerColumns({sheet});
@@ -510,7 +473,7 @@ module.exports = function() {
       player_data = player_data || tp.drawPlayers({sheet});
       let players = player_data.players;
       let round_data = tp.roundData({sheet, player_data});
-      let round_robin = players.map(p=>p.rr_result != undefined).reduce((a, b) => a || b);
+      let round_robin = players.length ? players.map(p=>p.rr_result != undefined).reduce((a, b) => a || b) : false;
 
       if (round_robin) {
          let hash = [];
@@ -586,6 +549,7 @@ module.exports = function() {
 
    tp.drawResults = (workbook) => {
       let rows = [];
+      tp.setWorkbookProfile({workbook});
 
       // keep track of points awarded
       // draws are processed starting with Finals so that once points have been
@@ -620,6 +584,7 @@ module.exports = function() {
          // HTS UTJEŠNI TURNIR == Consolation => no points
          
          // TODO: points as separate funciton result
+         // TODO: Round information for RR
 
          draw.matches.forEach(match => {
             let points = 0;
@@ -681,23 +646,7 @@ module.exports = function() {
       if (subInclude(sheet_names, ['BS', 'BD', 'GS', 'GD'])) tp.profile = 'TP';
    }
 
-   /* routines */
-   tp.saveObject = ({json, name, dir = 'Processed'}) => cacheFile(JSON.stringify(json), `${name}.json`, dir);
-   tp.loadObject = ({name, dir = 'Processed'}) => JSON.parse(loadFile(dir, `${name}.json`));
-
-   tp.allWorkbooks = (workbook_files) => {
-      let rows = [];
-      tp.verbose = true;
-      workbook_files.forEach((workbook_file, index) => {
-         console.log('processing:', workbook_file, 'index:', index);
-         let workbook = x.loadWorkbook(workbook_file);
-         let results = x.drawResults(workbook);
-         rows = rows.concat(...results.rows);
-      });
-      return rows;
-   }
-
-   tp.allTournaments = (workbooks = tp.workbookList()) => workbooks.map(workbook => tp.HTS_tournamentData(tp.loadWorkbook(workbook)));
-
-   return tp;
-}
+   if (typeof define === "function" && define.amd) define(tp); else if (typeof module === "object" && module.exports) module.exports = tp;
+   this.tp = tp;
+ 
+}();
