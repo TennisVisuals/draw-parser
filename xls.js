@@ -179,8 +179,8 @@
       // Necessary for finding all player rows in TP Doubles Draws
       if (profile.player_rows && profile.player_rows.player_names) {
          let additions = [];
-         player_names.forEach(f => { 
-            if (tp.value(sheet[`E${f}`]).toLowerCase() == 'bye') additions.push(f - 1); 
+         player_names.forEach(f => {
+            if (tp.value(sheet[`${columns.players}${f}`]).toLowerCase() == 'bye') additions.push(f - 1); 
          });
          sources.push(player_names);
       }
