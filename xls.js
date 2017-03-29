@@ -68,6 +68,8 @@
       }
       return middles;
    }
+   let getValue = (sheet, reference) => tp.value(sheet[reference]);
+   let numberValue = (sheet, reference) => !isNaN(parseInt(getValue(sheet, reference))) ? parseInt(getValue(sheet, reference)) : '';
    let letterValue = (letter) => parseInt(letter, 36) - 9;
    let getRow = (reference) => reference ? parseInt(/\d+/.exec(reference)[0]) : undefined;
    let getCol = (reference) => reference ? reference[0] : undefined;
@@ -159,18 +161,13 @@
       let rankings = Object.keys(sheet)
          .filter(f => f[0] == columns.rank && /\d/.test(f[1]) && validRanking(tp.value(sheet[f])))
          .map(ref=>getRow(ref));
+      let finals;
 
       // check whether this is Round Robin
       if (columns.rr_result) {
          rr_result = Object.keys(sheet)
             .filter(f => f[0] == columns.rr_result && /\d/.test(f[1]) && /^\d+[\.]*$/.test(tp.value(sheet[f])))
             .map(ref=>getRow(ref));
-         /*
-         let rr_min = Math.min(...rr_result);
-         let rr_max = Math.max(...rr_result);
-         player_names = player_names.filter(f => f >= rr_min && f <= rr_max && draw_positions.indexOf(f) >= 0);
-         */
-         // draw_positions = draw_positions.filter(f => rr_result.indexOf(f) >= 0);
          rankings = rankings.filter(f => rr_result.indexOf(f) >= 0);
       }
 
@@ -180,6 +177,7 @@
       if (profile.player_rows && profile.player_rows.player_names) {
          let additions = [];
          player_names.forEach(f => {
+            // additions is just a counter
             if (tp.value(sheet[`${columns.players}${f}`]).toLowerCase() == 'bye') additions.push(f - 1); 
          });
          sources.push(player_names);
@@ -187,16 +185,26 @@
 
       let rows = [].concat(...sources).filter((item, i, s) => s.lastIndexOf(item) == i).sort((a, b) => a - b);
 
-      // filter rows by gaps unless Round Robin Results Column
-      if (profile.gaps && profile.gaps.draw && !columns.rr_result) {
+      if (profile.gaps && profile.gaps.draw) {
          let gaps = findGaps({sheet, term: profile.gaps[draw].term}); 
          if (gaps.length) {
             let gap = gaps[profile.gaps[draw].gap];
-            rows = rows.filter(row => row > gap[0] && row < gap[1]);
+            if (!columns.rr_result) {
+               // filter rows by gaps unless Round Robin Results Column
+               rows = rows.filter(row => row > gap[0] && row < gap[1]);
+            } else {
+               // names that are within gap in round robin
+               finals = player_names.filter(row => row > gap[0] && row < gap[1]);
+            }
          }
       }
       let range = [rows[0], rows[rows.length - 1]];
-      return { rows, draw_positions, range };
+
+      // determine whether there are player rows outside of Round Robins
+      finals = finals ? finals.filter(f => rows.indexOf(f) < 0) : undefined;
+      finals = finals && finals.length ? finals : undefined;
+
+      return { rows, range, finals };
    }
    tp.roundColumns = ({sheet}) => {
       let header_row = tp.profiles[tp.profile].rows.header;
@@ -206,44 +214,45 @@
          .map(m=>m[0]).filter((item, i, s) => s.lastIndexOf(item) == i).sort();
       return columns;
    }
-   tp.roundData = ({sheet, player_data}) => {
+   tp.roundData = ({sheet, player_data, round_robin}) => {
       let players = player_data.players;
       let round_columns = tp.roundColumns({sheet});
       let range = player_data.range;
       let cell_references = Object.keys(sheet)
          .filter(ref => inDrawColumns(ref, round_columns) && inDrawRows(ref, range))
          .filter(ref => !extraneousData(sheet, ref));
-      let result = round_columns.map(column => { 
+
+      let filtered_columns = round_columns.map(column => { 
          let column_references = cell_references.filter(ref => ref[0] == column).filter(ref => scoreOrPlayer({ cell_value: tp.value(sheet[ref]), players }));
          return { column, column_references, }
       }).filter(f=>f.column_references.length);
-      /*
-      let start = round_columns.indexOf(result[0].column);
-      let end = round_columns.indexOf(result[result.length - 1].column);
-      console.log(start, end);
-      console.log(round_columns);
-      console.log(round_columns.slice(start, end));
-      console.log(result);
-      */
-      return result;
+
+      // work around for round robins with blank 'BYE' columns
+      let start = round_columns.indexOf(filtered_columns[0].column);
+      let end = round_columns.indexOf(filtered_columns[filtered_columns.length - 1].column);
+      let column_range = round_columns.slice(start, end);
+      let rr_columns = column_range.map(column => { 
+         let column_references = cell_references.filter(ref => ref[0] == column).filter(ref => scoreOrPlayer({ cell_value: tp.value(sheet[ref]), players }));
+         return { column, column_references, }
+      });
+
+      return round_robin ? rr_columns : filtered_columns;
    }
    tp.drawPlayers = ({sheet}) => {
-      let getValue = (reference) => tp.value(sheet[reference]);
-      let numberValue = (reference) => !isNaN(parseInt(getValue(reference))) ? parseInt(getValue(reference)) : '';
       let extract_seed = /\[(\d+)(\/\d+)?\]/;
       let columns = headerColumns({sheet});
       let rows, range;
-      ({rows, range} = tp.playerRows({sheet}));
+      ({rows, range, finals} = tp.playerRows({sheet}));
       let players = rows.map(row => {
-         let draw_position = numberValue(`${columns.position}${row}`);
+         let draw_position = numberValue(sheet, `${columns.position}${row}`);
 
          // MUST BE DOUBLES
-         if (!draw_position) draw_position = numberValue(`${columns.position}${row + 1}`);
+         if (!draw_position) draw_position = numberValue(sheet, `${columns.position}${row + 1}`);
 
          let player = { draw_position };
-         if (columns.seed) player.seed = numberValue(`${columns.seed}${row}`);
+         if (columns.seed) player.seed = numberValue(sheet, `${columns.seed}${row}`);
 
-         let full_name = getValue(`${columns.players}${row}`);
+         let full_name = getValue(sheet, `${columns.players}${row}`);
          if (extract_seed.test(full_name)) {
             player.seed = parseInt(extract_seed.exec(full_name)[1]);
             full_name = full_name.split('[')[0].trim();
@@ -251,15 +260,15 @@
 
          player.full_name = full_name;
          player.last_first_i = lastFirstI(full_name);
-         if (columns.id) player.id = getValue(`${columns.id}${row}`);
-         if (columns.club) player.club = getValue(`${columns.club}${row}`);
-         if (columns.rank) player.rank = numberValue(`${columns.rank}${row}`);
-         if (columns.entry) player.entry = getValue(`${columns.entry}${row}`);
-         if (columns.country) player.country = getValue(`${columns.country}${row}`);
-         if (columns.rr_result) player.rr_result = numberValue(`${columns.rr_result}${row}`);
+         if (columns.id) player.id = getValue(sheet, `${columns.id}${row}`);
+         if (columns.club) player.club = getValue(sheet, `${columns.club}${row}`);
+         if (columns.rank) player.rank = numberValue(sheet, `${columns.rank}${row}`);
+         if (columns.entry) player.entry = getValue(sheet, `${columns.entry}${row}`);
+         if (columns.country) player.country = getValue(sheet, `${columns.country}${row}`);
+         if (columns.rr_result) player.rr_result = numberValue(sheet, `${columns.rr_result}${row}`);
          return player;
       });
-      return { players, rows, range };
+      return { players, rows, range, finals };
    }
 
    tp.drawPosition = ({full_name, players, idx = 0}) => {
@@ -436,8 +445,6 @@
       let matches = [];
       player_data = player_data || tp.drawPlayers({sheet});
       let players = player_data.players;
-      let fplayers = player_data.players.filter(p => p.rr_result);
-      let round_data = tp.roundData({sheet, player_data});
       let round_robin = players.length ? players.map(p=>p.rr_result != undefined).reduce((a, b) => a || b) : false;
 
       if (round_robin) {
@@ -445,9 +452,9 @@
          let player_rows = player_data.rows;
          let pi = player_data.players.map((p, i) => p.rr_result ? i : undefined).filter(f=>f != undefined);
          let group_size = pi.length;
-         // let group_size = Math.max(...players.map(p=>p.draw_position));
 
          // combine all cell references that are in result columns
+         let round_data = tp.roundData({sheet, player_data, round_robin: true});
          let rr_columns = round_data.map(m=>m.column).slice(0, group_size);
          let result_references = [].concat(...round_data.map((round, index) => index < group_size ? round.column_references : []));
          player_rows.forEach((player_row, player_index) => {
@@ -455,7 +462,6 @@
             player_result_referencess.forEach(reference => {
                let result_column = reference[0];
                let player_draw_position = players[player_index].draw_position;
-               // let player_draw_position = fplayers[pi.indexOf(player_index)].draw_position;
                let opponent_draw_position = rr_columns.indexOf(result_column) + 1;
                let direction = opponent_draw_position > player_draw_position ? 1 : -1;
                let opponent_index = findPlayerAtDrawPosition(players, player_index, opponent_draw_position, direction);
@@ -481,8 +487,42 @@
                }
             });
          });
+
+         // also search for final match in sheet
+         let profile = tp.profiles[tp.profile];
+         if (player_data.finals && profile.targets && profile.targets.winner) {
+            let columns = headerColumns({sheet});
+            let keys = Object.keys(sheet);
+            let target = unique(keys.filter(f=>sheet[f].v == profile.targets.winner))[0];
+            if (target && target.match(/\d+/)) {
+               let finals_col = target[0];
+               let finals_row = parseInt(target.match(/\d+/)[0]);
+               let finals_range = player_data.finals.filter(f => f != finals_row);
+               let finals_cells = keys.filter(k => {
+                  let numeric = k.match(/\d+/);
+                  if (!numeric) return false;
+                  return numeric[0] >= finals_range[0] && numeric[0] <= finals_range[finals_range.length - 1] && k[0] == finals_col;
+               }).filter(ref => scoreOrPlayer({ cell_value: tp.value(sheet[ref]), players }));
+               let finals_details = finals_cells.map(fc => sheet[fc].v);
+               let finalists = player_data.finals
+                  .map(row => getValue(sheet, `${columns.players}${row}`))
+                  .filter(player => scoreOrPlayer({ cell_value: player, players }));
+               let winner = finals_details.filter(f => finalists.indexOf(f) >= 0)[0];
+               let result = finals_details.filter(f => finalists.indexOf(f) < 0)[0];
+               let loser = finalists.filter(f => f != winner)[0];
+               let match = {
+                  winner_names: [winner],
+                  loser_names: [loser],
+                  round: 'F',
+                  result,
+               }
+               matches.push(match);
+            }
+         }
+
       } else {
          let first_round;
+         let round_data = tp.roundData({sheet, player_data});
          rounds = round_data.map(round => {
             let column_matches = columnMatches(sheet, round, players);
             let matches_with_results = column_matches.matches.filter(match => match.result);

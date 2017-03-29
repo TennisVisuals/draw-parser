@@ -111,6 +111,7 @@
       header_columns: [
          { attr: 'rr_result',     header: 'Poredak' },
       ],
+      targets: { winner: 'Pobjednik', },
       extraneous: { starts_with: ['gs', 'bez', 'pobjed', 'final'], },
       routines: { add_byes:   true, }
    };
