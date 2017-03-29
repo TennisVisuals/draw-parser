@@ -215,6 +215,7 @@
       return columns;
    }
    tp.roundData = ({sheet, player_data, round_robin}) => {
+      let rr_columns;
       let players = player_data.players;
       let round_columns = tp.roundColumns({sheet});
       let range = player_data.range;
@@ -228,13 +229,15 @@
       }).filter(f=>f.column_references.length);
 
       // work around for round robins with blank 'BYE' columns
-      let start = round_columns.indexOf(filtered_columns[0].column);
-      let end = round_columns.indexOf(filtered_columns[filtered_columns.length - 1].column);
-      let column_range = round_columns.slice(start, end);
-      let rr_columns = column_range.map(column => { 
-         let column_references = cell_references.filter(ref => ref[0] == column).filter(ref => scoreOrPlayer({ cell_value: tp.value(sheet[ref]), players }));
-         return { column, column_references, }
-      });
+      if (filtered_columns.length) {
+         let start = round_columns.indexOf(filtered_columns[0].column);
+         let end = round_columns.indexOf(filtered_columns[filtered_columns.length - 1].column);
+         let column_range = round_columns.slice(start, end);
+         rr_columns = column_range.map(column => { 
+            let column_references = cell_references.filter(ref => ref[0] == column).filter(ref => scoreOrPlayer({ cell_value: tp.value(sheet[ref]), players }));
+            return { column, column_references, }
+         });
+      }
 
       return round_robin ? rr_columns : filtered_columns;
    }
@@ -454,7 +457,7 @@
          let group_size = pi.length;
 
          // combine all cell references that are in result columns
-         let round_data = tp.roundData({sheet, player_data, round_robin: true});
+         let round_data = tp.roundData({sheet, player_data, round_robin: true}) || [];
          let rr_columns = round_data.map(m=>m.column).slice(0, group_size);
          let result_references = [].concat(...round_data.map((round, index) => index < group_size ? round.column_references : []));
          player_rows.forEach((player_row, player_index) => {
@@ -488,11 +491,11 @@
             });
          });
 
-         // also search for final match in sheet
+         // also search for final match in single-page RR sheet
          let profile = tp.profiles[tp.profile];
          if (player_data.finals && profile.targets && profile.targets.winner) {
-            let columns = headerColumns({sheet});
             let keys = Object.keys(sheet);
+            let columns = headerColumns({sheet});
             let target = unique(keys.filter(f=>sheet[f].v == profile.targets.winner))[0];
             if (target && target.match(/\d+/)) {
                let finals_col = target[0];
@@ -584,11 +587,14 @@
          let format = match.winner_2 ? 'doubles' : 'singles';
          let points = tp.calcPoints(category || match.tournament_category, rank || match.tournament_rank, match.round, format, match.draw_positions, match.score, profile);
          let pp = player_points[format];
-         if (match.draw_type != 'consolation') {
-         }
-         if (points && !pp[match.winner_1] || points > pp[match.winner_1]) {
-            player_points[format][match.winner_1] = points;
-            if (match.winner_2) player_points[format][match.winner_2] = points;
+         // if (match.draw_type != 'consolation') { }
+         if (points && (!pp[match.winner_1] || points > pp[match.winner_1].points)) {
+            let id = match.winner_1_id;
+            player_points[format][match.winner_1] = { points, id };
+            if (match.winner_2) {
+               let id = match.winner_2_id;
+               player_points[format][match.winner_2] = { points, id };
+            }
          }
       });
       return player_points;
@@ -650,12 +656,16 @@
                score: match.result,
                winner_1: match.winner_names[0],
                winner_1_rank: pd.w1 ? pd.w1.rank : '',
+               winner_1_id: pd.w1 ? pd.w1.id : '',
                winner_2: match.winner_names[1] || '',
                winner_2_rank: pd.w2 ? pd.w2.rank : '',
+               winner_2_id: pd.w2 ? pd.w2.id : '',
                loser_1: match.loser_names[0], 
                loser_1_rank: pd.l1 ? pd.l1.rank : '',
+               loser_1_id: pd.l1 ? pd.l1.id : '',
                loser_2: match.loser_names[1] || '',
                loser_2_rank: pd.l2 ? pd.l2.rank : '',
+               loser_2_id: pd.l2 ? pd.l2.id : '',
                draw_positions,
             });
             if (match.winner_names[0]) rows.push(row);
